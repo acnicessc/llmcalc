@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLM Inference TCO Calculator — v2</title>
+  <style>
+    :root{
+      --bg:#f3f6fa; --panel:#fff; --ink:#222; --ink-2:#335075; --ink-3:#26374a; --muted:#64748b; --line:#e3e8ef; --accent:#1472ff;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.4}
+    .container{max-width:1024px;margin:auto;padding:24px}
+    h1{margin:0 0 12px;color:var(--ink-3)}
+    h2{margin:0 0 8px;color:var(--ink-2)}
+    .grid{display:grid;gap:16px}
+    @media(min-width:900px){.grid.cols-2{grid-template-columns:1fr 1fr}}
+    .card{background:var(--panel);padding:18px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+    label{display:block;font-weight:600;margin:10px 0 6px}
+    .row{display:grid;grid-template-columns:1fr 160px;gap:8px;align-items:center}
+    input, select{width:100%;padding:8px 10px;border-radius:8px;border:1px solid #cbd5e1;font-size:.95rem}
+    small{color:var(--muted)}
+    details summary{cursor:pointer;font-weight:700;margin:-6px 0 8px}
+    .muted{color:var(--muted);font-size:.9rem}
+    .live{color:var(--accent);font-size:.92rem;margin-top:8px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px 10px;border:1px solid var(--line);text-align:left}
+    th{background:#f8fafc}
+    .out{background:#fafcff;border:1px solid var(--line);border-radius:10px;padding:14px}
+    .badge{display:inline-block;background:#eef2ff;color:#3730a3;padding:2px 8px;border-radius:999px;font-size:.75rem;font-weight:700}
+    .warn{background:#fff7ed;color:#9a3412}
+    .ok{background:#ecfdf5;color:#065f46}
+    .row2{display:flex;gap:12px;flex-wrap:wrap}
+    .kpi{flex:1;min-width:180px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px}
+    .kpi b{display:block;font-size:1.1rem;color:#0f172a}
+    .kpi span{color:var(--muted);font-size:.85rem}
+    .footer-note{font-size:.85rem;color:#334155}
+
+    /* Highlight “start here” controls */
+.callout {
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  padding: 6px 10px;
+  background: rgba(20,114,255,0.05);
+}
+.callout label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.callout .hint {
+  margin-left: 8px;
+  font-size: .75rem;
+  font-weight: 700;
+  color: #0b5ed7;
+  background: #e7f1ff;
+  border: 1px solid #b6d2ff;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>LLM Inference TCO Calculator <span class="badge">v2</span></h1>
+   
+    <div class="grid cols-2">
+      <div class="card">
+        <h2>Workload Inputs</h2>
+        <div class="row"><label for="concurrentUsers">Concurrent Users (peak)</label><input id="concurrentUsers" type="number" value="15000" min="10" step="100"></div>
+        <div class="row"><label for="rpsPerUser">Requests per User per Minute</label><input id="rpsPerUser" type="number" value="2" min="0.1" step="0.1"></div>
+
+        <!-- NEW: Average concurrent users & duty cycle -->
+        <div class="row">
+          <label for="avgUsers">Average Concurrent Users <small>(optional)</small></label>
+          <input id="avgUsers" type="number" value="" min="0" step="10" placeholder="e.g., 4000">
+        </div>
+        <div class="row">
+          <label for="dutyCycle">Duty Cycle % <small>(avg ÷ peak)</small></label>
+          <input id="dutyCycle" type="number" value="30" min="1" max="100" step="1">
+        </div>
+        <p class="muted">Duty cycle is the fraction of time your system runs at peak traffic. <br>Sizing uses <b>peak</b> (with headroom). Unit costs use <b>average</b> (avg users if set, otherwise peak × duty cycle.)</p>
+        <!-- /NEW -->
+
+        <div class="row"><label for="promptTok">Prompt Tokens / Request <small>(prefill)</small></label><input id="promptTok" type="number" value="150" min="1" step="5"></div>
+          <p class="muted">The input prompt: Less work for the model, so has less impact on the outcomes.</p>
+        <div class="row"><label for="genTok">Generation Tokens / Request <small>(decode)</small></label><input id="genTok" type="number" value="150" min="1" step="5"></div>
+          <p class="muted">The output: Likely between 100 and 250 depending on how "chatty" the model is configured.</p>
+        <div class="row"><label for="batchingEfficiency">Batching Efficiency ×</label><input id="batchingEfficiency" type="number" value="1.4" min="1" step="0.1"></div>
+        <p class="muted">Wired to both prefill and decode, clamped to 1-.0 to 2.0 for decode, could be separated for further accuracy.</p>
+        <div class="row">
+          <label for="headroom">Headroom</label>
+          <input id="headroom" type="number" value="1.3" min="1" step="0.05">
+        <p class="muted">Overhead for surge capacity (and failover/SLO cushion/forecasting errors).</p>
+          
+        </div>
+        <div class="live" id="liveUsers"></div>
+      </div>
+
+      <div class="card">
+        <h2>Model & Scenario</h2>
+
+<!-- Scenario -->
+<div class="row callout">
+  <label for="scenario">
+    Scenario <span class="hint">Start here</span>
+  </label>
+  <select id="scenario">
+    <option value="base" selected>Base (Conservative)</option>
+    <option value="dell">Dell (Benchmark)</option>
+    <option value="optimistic">Optimistic</option>
+  </select>
+</div>
+
+<!-- Model -->
+<div class="row callout">
+  <label for="model">
+    Model <span class="hint">Try options</span>
+  </label>
+  <select id="model">
+    <option value="13B">13B - example</option>
+    <option value="30B" selected>30B - example</option>
+    <option value="qwen3-32b">Qwen3-32B</option>
+    <option value="deepseek-r1d-32b">DeepSeek-R1 Distill Qwen-32B</option>
+    <option value="70B">70B - example</option>
+    <option value="command-a">111B - Command A</option>
+  </select>
+</div>
+
+<!-- GPU Type -->
+<div class="row callout">
+  <label for="gpuType">
+    GPU Type <span class="hint">Compare H100/H200</span>
+  </label>
+  <select id="gpuType">
+    <option value="h100" selected>H100</option>
+    <option value="h200">H200</option>
+  </select>
+</div>        <div class="row"><label for="gpusPerReplica">GPUs per Replica <small>(fits/precision)</small></label><input id="gpusPerReplica" type="number" value="1" min="1" step="1"></div>
+        <details>
+          <summary>Advanced Throughput (per-GPU)</summary>
+          <div class="row"><label for="prefillTps">Prefill TPS / GPU</label><input id="prefillTps" type="number" value="8000" min="1" step="1"></div>
+          <div class="row"><label for="decodeTps">Decode TPS / GPU</label><input id="decodeTps" type="number" value="400" min="1" step="1"></div>
+          <p class="muted">Scenario presets fill in the Decode TPS per GPU. Prefill TPS per GPU is set by you and is typically 5–20× higher than decode (due to better parallelism)</p>
+        <div class="row"><label for="overlap">Stage Overlap (%)</label><input id="overlap" type="number" value="85" min="0" max="100" step="1"></div>
+        <p span class="muted">How much prefill and decode run simultaneously.</p>
+        </details>
+        <div class="live" id="liveCapacity"></div>
+      </div>
+
+      <div class="card">
+        <h2>Infrastructure & Cost</h2>
+        <div class="row"><label for="gpusPerServer">GPUs per Server</label><input id="gpusPerServer" type="number" value="8" min="1" step="1"></div>
+        <div class="row"><label for="serverCost">Server Cost (CAD)</label><input id="serverCost" type="number" value="420000" min="1" step="1000"></div>
+        <div class="row"><label for="powerDraw">IT Power / Server (kW) <small>@ peak</small></label><input id="powerDraw" type="number" value="7.5" min="0.1" step="0.1"></div>
+        <div class="row"><label for="pue">PUE</label><input id="pue" type="number" value="1.4" min="1" step="0.05"></div>
+        <div class="row"><label for="util">Avg Utilization (%)</label><input id="util" type="number" value="70" min="1" max="100" step="1"></div>
+        <div class="row"><label for="elec">Electricity (CAD/kWh)</label><input id="elec" type="number" value="0.13" min="0.01" step="0.01"></div>
+        <div class="row"><label for="supportPct">Support (% of CapEx / yr)</label><input id="supportPct" type="number" value="7" min="0" step="0.5"></div>
+        <div class="row"><label for="staffing">Staffing (CAD / yr)</label><input id="staffing" type="number" value="600000" min="0" step="1000"></div>
+        <div class="row"><label for="networking">Networking & Misc (CAD / yr)</label><input id="networking" type="number" value="150000" min="0" step="1000"></div>
+        <div class="row"><label for="years">Depreciation (years)</label><input id="years" type="number" value="4" min="1" step="1"></div>
+        <!-- moved up -- div class="row"><label for="headroom">Headroom ×</label><input id="headroom" type="number" value="1.3" min="1" step="0.05"></div> -->
+      </div>
+
+      <div class="card">
+        <h2>Results</h2>
+        <div class="row2">
+          <div class="kpi"><b id="kpiGpus">—</b><span>Total GPUs</span></div>
+          <div class="kpi"><b id="kpiServers">—</b><span>Total Servers</span></div>
+          <div class="kpi"><b id="kpiCapex">—</b><span>CapEx (CAD)</span></div>
+          <div class="kpi"><b id="kpiOpex">—</b><span>Annual OpEx (CAD)</span></div>
+          <div class="kpi"><b id="kpiAllIn">—</b><span>Total Annual Cost (CAD)</span></div>
+        </div>
+        <div class="out" id="results"></div>
+        <p class="footer-note">Costs also shown as $/request and $/1M tokens using utilization-adjusted annual demand. Overlap-weighted staging and TP penalty applied when applicable.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Assumptions & Notes</h2>
+      <b>Explanation</b>
+      <p class="muted">Throughput is measured as how many tokens per second a single GPU can generate 
+        (counting the output side by defauly). The calculator automatically adjusts cost and power 
+        based on the GPU type. It also factors in data-center overhead (PUE - power usage effectiveness), how busy the GPUs are on
+         average (utilization), extra safety margin (headroom), how many GPUs fit in a server, 
+         hardware depreciation, and then rolls it all up into cost per token or per request, with 
+         checks to catch unrealistic values.</b>
+      </p>
+      <p>*Benchmarks put tokens per second as low as 20 and as high as 20,000 or more on an H100 depending on model and tuning. This calculator could be off by a factor of 10. Proper benchmarking should be performed for scaling estimates. Command A in particular shows benchmarks of < 150 tok/s on 2 x H100.</p>
+      <p class="muted">Warning banners appear if 70B is configured with <em>GPUs per Replica = 1</em> (likely infeasible without aggressive quantization).</p>
+
+      <b>Biggest "unknowns" on performance: </b>
+        
+        <ul class="muted">
+        <li> stack and kernel optimization </li>
+        <li>Precision vs quantization balance -- accuracy vs performance </li>
+        <li>Internal batching efficiency vs latency </li>
+        <li>Speculative or assisted decoding (could increase efficiency sgnificantly) </li>
+        <li>Parallelism, balancing over multiple GPUs/replica. If we are trying to run large models on H100 especially could take a major hit (if it can't all fit in RAM).  </li>
+        <li>Request shape (prompt vs output length): A few very long responses can consume far more compute than dozens of short ones, making averages misleading. </li>
+
+      </ul>
+<b>Notes</b>
+<ul class="muted">
+        <li><b>Throughput is per-GPU.</b> Scenario decode TPS fills <em>Decode TPS / GPU</em>. Prefill TPS / GPU is user-set.</li>
+        <li>Demand: RPS = users × rps/user. Token demand = RPS × (prompt + generation).</li>
+        <li>Batching multiplies effective TPS (bounded by latency SLOs).</li>
+        <li><b>Overlap-weighted GPUs:</b> effective = overlap × max(prefill, decode) + (1 − overlap) × (prefill + decode).</li>
+        <li><b>TP penalty:</b> if GPUs/Replica &gt; 1, throughput haircut = 10% × (extra GPUs), capped at 50%.</li>
+        <li>GPUs computed as: ceil(effective × headroom), then rounded up to multiples of GPUs/Replica.</li>
+        <li>Energy uses PUE and average utilization: kWh = servers × ITkW × utilization × 8760 × PUE.</li>
+      </ul>
+<ul>
+<b>References - (not exhaustive)</b>
+
+<ul>
+  <li><a href="https://medium.com/@paulgoll/nvidia-h100-vs-h200-a-comprehensive-comparison-ef81b24a2b90" target="_blank" rel="noopener">NVIDIA H100 vs H200 — Medium</a></li>
+  <li><a href="https://www.baseten.co/blog/unlocking-the-full-power-of-nvidia-h100-gpus-for-ml-inference-with-tensorrt/#better-throughput-from-higher-memory-bandwidth" target="_blank" rel="noopener">BaseTen: Unlocking H100 for ML inference (TensorRT)</a></li>
+  <li><a href="https://openmetal.io/resources/blog/nvidia-h100-vs-a100-gpu-comparison/" target="_blank" rel="noopener">OpenMetal: H100 vs A100 comparison</a></li>
+  <li><a href="https://cohere.com/blog/command-a" target="_blank" rel="noopener">Cohere: Command A</a> — 156 tokens/sec on 2× H100</li>
+  <li><a href="https://www.dell.com/en-us/blog/benchmarking-h100-gpu-performance-for-generative-ai-inference/" target="_blank" rel="noopener">Dell: Benchmarking H100 for GenAI inference</a></li>
+  <li><a href="https://infohub.delltechnologies.com/de-de/p/benchmarking-nvidia-gpu-throughput-for-llms-and-understanding-gpu-configuration-choices-in-the-ai-space/?utm_source=chatgpt.com" target="_blank" rel="noopener">Dell Info Hub: LLM throughput & GPU config choices</a></li>
+</ul>
+
+    </div>
+
+<div class="card">
+      <h2>Recent Benchmarks</h2>
+      <p class="muted">These are some of the more recent benchmarks for large language models on H100 GPUs. Note that performance varies widely based on model architecture, precision, and inference stack. The calculator uses conservative estimates for 30B and 70B models, but actual performance may be significantly better or worse depending on the specific setup.</p>
+<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%">
+  <thead style="background:#f8fafc">
+    <tr>
+      <th>Model (size)</th>
+      <th>Precision / Setup</th>
+      <th>H100 Config</th>
+      <th>Tokens/sec (what)</th>
+      <th>Source</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Qwen3-32B</td>
+      <td>BF16 via vLLM <code>benchmark_serving</code></td>
+      <td>1× H100 NVL (~95 GB)</td>
+      <td><b>653.61</b> output tok/s (total 1362.23 tok/s)</td>
+      <td><a href="https://github.com/vllm-project/vllm/issues/17788" target="_blank" rel="noopener">vLLM GitHub issue #17788</a></td>
+    </tr>
+    <tr>
+      <td>Qwen3-32B</td>
+      <td>FP8 via vLLM <code>benchmark_serving</code></td>
+      <td>1× H100 NVL (~95 GB)</td>
+      <td><b>879.25</b> output tok/s (total 1829.67 tok/s)</td>
+      <td><a href="https://github.com/vllm-project/vllm/issues/17788" target="_blank" rel="noopener">vLLM GitHub issue #17788</a></td>
+    </tr>
+    <tr>
+      <td>DeepSeek-R1-Distill-Qwen-32B</td>
+      <td>FP16 via vLLM (online/serving; 100-in / 600-out, 300 req)</td>
+      <td>1× H100 80 GB</td>
+      <td><b>1214.19</b> output tok/s (total 1481.62 tok/s)</td>
+      <td><a href="https://www.databasemart.com/blog/vllm-gpu-benchmark-h100" target="_blank" rel="noopener">DatabaseMart H100 vLLM benchmark</a></td>
+    </tr>
+  </tbody>
+</table>
+
+  </div>
+
+  <script>
+    // ---------------- Presets & Defaults ----------------
+
+    const scenarios = {
+  base: {
+    '13B': { decodeTps: 600,  gpus: 1 },
+    '30B': { decodeTps: 400,  gpus: 1 },
+    '70B': { decodeTps: 300,  gpus: 2 },
+    'command-a': { decodeTps: 75, gpus: 2 },
+
+    // NEW (bench anchored)
+    'qwen3-32b':        { decodeTps: 500,  gpus: 1 },  // conservative vs BF16/FP8 reports
+    'deepseek-r1d-32b': { decodeTps: 800,  gpus: 1 },  // conservative vs H100 online test
+  },
+  dell: {
+    '13B': { decodeTps: 1900, gpus: 1 },
+    '30B': { decodeTps: 1500, gpus: 1 },
+    '70B': { decodeTps: 900,  gpus: 2 },
+    'command-a': { decodeTps: 200, gpus: 2 },
+
+    // NEW (directly from public H100 runs)
+    'qwen3-32b':        { decodeTps: 750,  gpus: 1 },  // 653 BF16 to 879 FP8 on 1× H100 NVL :contentReference[oaicite:0]{index=0}
+    'deepseek-r1d-32b': { decodeTps: 1214, gpus: 1 },  // H100 80GB online serving (100-in/600-out) :contentReference[oaicite:1]{index=1}
+  },
+  optimistic: {
+    '13B': { decodeTps: 2000, gpus: 1 },
+    '30B': { decodeTps: 1800, gpus: 1 },
+    '70B': { decodeTps: 1000, gpus: 2 },
+    'command-a': { decodeTps: 300, gpus: 2 },
+
+    // NEW (upper bound of public reports / FP8 wins)
+    'qwen3-32b':        { decodeTps: 900,  gpus: 1 },  // near FP8 figure on H100 NVL :contentReference[oaicite:2]{index=2}
+    'deepseek-r1d-32b': { decodeTps: 1400, gpus: 1 },  // slight headroom over 1214 for well-tuned stacks :contentReference[oaicite:3]{index=3}
+  }
+};
+
+    const gpuDefaults = {
+      h100: { serverCost: 420000, powerDraw: 9.5,  multPref: 1.0,  multDec: 1.0 },
+      h200: { serverCost: 480000, powerDraw: 10.2, multPref: 1.15, multDec: 1.35 }
+    };
+
+    // ---------------- Time Constants ----------------
+    const HOURS_PER_YEAR   = 8760;                 // for energy (kWh)
+    const SECONDS_PER_YEAR = 365 * 24 * 3600;      // 31,536,000 for unit economics
+
+    // ---------------- Utilities ----------------
+    const el  = id => document.getElementById(id);
+    const nz  = (x, fb=1) => { x = +x; return (x>0 && isFinite(x)) ? x : fb; };
+    const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+    const fmtMoney = n => n.toLocaleString(undefined,{maximumFractionDigits:0});
+
+    // NEW: peak/average RPS helper
+    function getRpsPeakAvg() {
+      const usersPeak = nz(el('concurrentUsers').value, 1);
+      const rpuMin = nz(el('rpsPerUser').value, 0.001); // requests per user per minute
+      const rpsPeak = usersPeak * (rpuMin / 60);        // peak rps
+
+      const avgUsersRaw = +el('avgUsers').value;
+      const duty = clamp(nz(el('dutyCycle').value, 30) / 100, 0.01, 1);
+      const usersAvg = (Number.isFinite(avgUsersRaw) && avgUsersRaw > 0) ? avgUsersRaw : usersPeak * duty;
+
+      const rpsAvg = usersAvg * (rpuMin / 60);
+      return { rpsPeak, rpsAvg, usersAvg, usersPeak };
+    }
+
+    function applyScenario() {
+      const s = el('scenario').value;
+      const m = el('model').value;
+      const preset = scenarios[s][m];
+      // Use per-GPU decode TPS from scenario. Prefill is user controlled.
+      el('decodeTps').value = preset.decodeTps;
+      el('gpusPerReplica').value = preset.gpus;
+      updateLive();
+      calc();
+    }
+
+    // Apply GPU defaults when GPU type changes
+    function applyGpuDefaults() {
+      const def = gpuDefaults[el('gpuType').value];
+      el('serverCost').value = def.serverCost;
+      el('powerDraw').value  = def.powerDraw;
+
+      // ensure any bound listeners/UI react
+      el('serverCost').dispatchEvent(new Event('input', { bubbles: true }));
+      el('powerDraw').dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // REPLACED: show peak & average RPS
+    function liveUsers() {
+      const { rpsPeak, rpsAvg, usersAvg } = getRpsPeakAvg();
+      el('liveUsers').textContent =
+        `Live: peak ~${rpsPeak.toFixed(1)} rps · average ~${rpsAvg.toFixed(1)} rps (avg users ≈ ${Math.round(usersAvg)})`;
+    }
+
+    // TP penalty helpers (kept as-is except values already in your code)
+    const TP_PENALTY_PER_EXTRA = 0.20; // 20% per extra GPU in the replica
+    const TP_PENALTY_CAP = 0.50;       // cap total haircut at 50%
+
+    function tpPenaltyFactor(gpr){
+      const extra = Math.max(0, nz(gpr,1) - 1);
+      const haircut = Math.min(extra * TP_PENALTY_PER_EXTRA, TP_PENALTY_CAP);
+      return 1 - haircut; // multiplier applied to throughput
+    }
+
+    // Show effective per-GPU capacity with batching & TP penalty
+    function updateLive() {
+      liveUsers();
+      const def = gpuDefaults[el('gpuType').value] || { multPref: 1, multDec: 1 };
+      const gpr = Math.max(1, nz(el('gpusPerReplica').value, 1));
+      const tpMult = tpPenaltyFactor(gpr);
+
+      const Bpref = clamp(nz(el('batchingEfficiency').value, 1), 1, 8);
+      const Bdec  = clamp(nz(el('batchingEfficiency').value, 1), 1, 2);
+
+      const preT = nz(el('prefillTps').value, 1000) * def.multPref * Bpref * tpMult;
+      const decT = nz(el('decodeTps').value,   100) * def.multDec  * Bdec  * tpMult;
+
+      const preTxt = Number.isFinite(preT) ? Math.round(preT) : '—';
+      const decTxt = Number.isFinite(decT) ? Math.round(decT) : '—';
+
+      el('liveCapacity').textContent =
+        `Effective per-GPU capacity (with batching & TP penalty): Prefill ~${preTxt} tps · Decode ~${decTxt} tps`;
+    }
+
+    function calc() {
+      // Demand side (PEAK for sizing; AVERAGE for economics)
+      const { rpsPeak, rpsAvg } = getRpsPeakAvg();
+      const pTok  = nz(el('promptTok').value, 1);
+      const gTok  = nz(el('genTok').value, 1);
+
+      // Supply side (per-GPU)
+      const def = gpuDefaults[el('gpuType').value];
+      const gpr = Math.max(1, nz(el('gpusPerReplica').value, 1));
+      const tpMult = tpPenaltyFactor(gpr);
+
+      const Bpref = clamp(nz(el('batchingEfficiency').value, 1), 1, 8);
+      const Bdec  = clamp(nz(el('batchingEfficiency').value, 1), 1, 2);
+
+      const preTpsGpu = nz(el('prefillTps').value, 1000) * def.multPref * Bpref * tpMult;
+      const decTpsGpu = nz(el('decodeTps').value,  100)  * def.multDec  * Bdec  * tpMult;
+
+      // GPUs required by each stage (steady-state, PEAK)
+      const gpuPrefill = (rpsPeak * pTok) / preTpsGpu;
+      const gpuDecode  = (rpsPeak * gTok) / decTpsGpu;
+
+      // Overlap-weighted effective GPUs (still pays penalty when overlap<100%)
+      const overlap = clamp(nz(el('overlap').value, 85)/100, 0, 1);
+      const baseGPUs =
+        overlap * Math.max(gpuPrefill, gpuDecode) +
+        (1 - overlap) * (gpuPrefill + gpuDecode);
+
+      // Headroom and packing to GPUs/Replica
+      const headroom = nz(el('headroom').value, 1.3);
+      let requiredGPUs = Math.ceil(baseGPUs * headroom);
+      requiredGPUs = Math.ceil(requiredGPUs / gpr) * gpr;
+
+      // Servers and procured GPUs
+      const gps = nz(el('gpusPerServer').value, 8);
+      const servers = Math.max(1, Math.ceil(requiredGPUs / gps));
+      const fleetGPUs = servers * gps;
+
+      // Costs: CapEx
+      const serverCost = nz(el('serverCost').value, 1);
+      const capex = serverCost * servers;
+      const years = nz(el('years').value, 4);
+      const annualizedCapex = capex / years;
+
+      // Power & OpEx
+      const itkW = nz(el('powerDraw').value, 1);
+      const pue  = clamp(nz(el('pue').value, 1.4), 1, 3);
+      const util = clamp(nz(el('util').value, 70)/100, 0.01, 1);
+      const kWh  = servers * itkW * HOURS_PER_YEAR * util * pue; // utilization-adjusted
+      const cKWh = nz(el('elec').value, 0.1);
+      const powerCost = kWh * cKWh;
+
+      const support = (nz(el('supportPct').value, 0)/100) * capex;
+      const staffing = nz(el('staffing').value, 0);
+      const networking = nz(el('networking').value, 0);
+      const opex = powerCost + support + staffing + networking;
+      const totalAnnual = annualizedCapex + opex;
+
+      // Unit economics (AVERAGE load; still utilization-adjusted as before)
+      const annualTokens = (rpsAvg * (pTok + gTok)) * SECONDS_PER_YEAR * util;
+      const costPer1MTok = annualTokens > 0 ? (totalAnnual / annualTokens) * 1000000 : 0;
+      const annualReqs   = rpsAvg * SECONDS_PER_YEAR * util;
+      const costPerReq   = annualReqs > 0 ? (totalAnnual / annualReqs) : 0;
+
+      // KPIs
+      el('kpiGpus').textContent    = Number.isFinite(fleetGPUs) ? fleetGPUs.toLocaleString() : '—';
+      if (document.getElementById('kpiGpusReq')) {
+        document.getElementById('kpiGpusReq').textContent = Number.isFinite(requiredGPUs) ? requiredGPUs.toLocaleString() : '—';
+      }
+      el('kpiServers').textContent = Number.isFinite(servers) ? servers.toLocaleString() : '—';
+      el('kpiCapex').textContent   = `$${fmtMoney(Number.isFinite(capex)?capex:0)}`;
+      el('kpiOpex').textContent    = `$${fmtMoney(Number.isFinite(opex)?opex:0)}`;
+      el('kpiAllIn').textContent   = `$${fmtMoney(Number.isFinite(totalAnnual)?totalAnnual:0)}`;
+
+      // Warnings
+      let warnings = [];
+      const m = el('model').value;
+      if (m === '70B' && nz(el('gpusPerReplica').value,1) < 2) {
+        warnings.push('70B with GPUs/Replica = 1 is likely infeasible without aggressive quantization.');
+      }
+
+      // Render breakdown
+      const annualTokensTxt = annualTokens>0
+        ? annualTokens.toLocaleString(undefined,{maximumFractionDigits:0})
+        : '—';
+      const costPer1MTxt = costPer1MTok>0 ? costPer1MTok.toFixed(4) : '—';
+      const costPerReqTxt = costPerReq>0 ? costPerReq.toFixed(4) : '—';
+
+      const preTxt = Number.isFinite(preTpsGpu) ? Math.round(preTpsGpu) : '—';
+      const decTxt = Number.isFinite(decTpsGpu) ? Math.round(decTpsGpu) : '—';
+
+      el('results').innerHTML = `
+        ${warnings.length? `<p class="badge warn">${warnings.join(' ')}</p>`: ''}
+        <table>
+          <tr><th colspan="2">Annual OpEx (CAD)</th></tr>
+          <tr><td>Power</td><td>$${fmtMoney(powerCost)}</td></tr>
+          <tr><td>Support</td><td>$${fmtMoney(support)}</td></tr>
+          <tr><td>Staffing</td><td>$${fmtMoney(staffing)}</td></tr>
+          <tr><td>Networking & Misc</td><td>$${fmtMoney(networking)}</td></tr>
+          <tr><th>Total OpEx</th><th>$${fmtMoney(opex)}</th></tr>
+        </table>
+        <br />
+        <table>
+          <tr><th colspan="2">Unit Economics</th></tr>
+          <tr><td>Annual Tokens (util-adj)</td><td>${annualTokensTxt}</td></tr>
+          <tr><td>Cost / 1M tokens</td><td>$${costPer1MTxt}</td></tr>
+          <tr><td>Cost / Request</td><td>$${costPerReqTxt}</td></tr>
+          <tr><td>Required GPUs (calc)</td><td id="kpiGpusReq">${Number.isFinite(requiredGPUs)?requiredGPUs.toLocaleString():'—'}</td></tr>
+          <tr><td>Average IT kW</td><td>${(servers * itkW * util).toFixed(2)} kW</td></tr>
+          <tr><td>Annual kWh (with PUE)</td><td>${kWh.toLocaleString(undefined,{maximumFractionDigits:0})} kWh</td></tr>
+        </table>
+        <p class="muted">Per-GPU effective TPS (with batching & TP penalty): Prefill ~${preTxt} · Decode ~${decTxt}</p>
+      `;
+    }
+
+    // ---------------- Wiring ----------------
+    el('scenario').addEventListener('change', applyScenario);
+    el('model').addEventListener('change', applyScenario);
+
+    ['change','input'].forEach(evt => {
+      el('gpuType').addEventListener(evt, () => { applyGpuDefaults(); updateLive(); calc(); });
+    });
+
+    [
+      'concurrentUsers','rpsPerUser','avgUsers','dutyCycle',
+      'promptTok','genTok','batchingEfficiency',
+      'gpusPerReplica','overlap','prefillTps','decodeTps',
+      'gpusPerServer','serverCost','powerDraw','pue','util','elec','supportPct','staffing','networking','years','headroom'
+    ].forEach(id => el(id).addEventListener('input', () => { updateLive(); calc(); }));
+
+    // Initialize
+    applyScenario();
+    applyGpuDefaults();
+    updateLive();
+    calc();
+  </script>
+</body>
+</html>
